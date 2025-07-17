@@ -1,0 +1,1771 @@
+--- START OF FILE api_client.py ---
+
+# --- START OF FILE api_client.py ---
+
+# api_client.py
+
+import requests
+import pandas as pd
+import sys
+
+# --- API Configuration ---
+BINANCE_SPOT_URL = "https://api.binance.com/api/v3"
+BINANCE_FUTURES_URL = "https://fapi.binance.com/fapi/v1"
+FNG_API_URL = "https://api.alternative.me/fng/"
+
+
+# === START OF MODIFIED FUNCTIONS ===
+
+def check_coin_availability(symbol, market_type):
+    """Check if the trading pair exists on Binance."""
+    base_url = BINANCE_FUTURES_URL if market_type == "futures" else BINANCE_SPOT_URL
+    url = f"{base_url}/ticker/price?symbol={symbol.upper()}"
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        if response.status_code == 200:
+            return True
+    except requests.exceptions.RequestException as e:
+        # ADDED LOGGING
+        print(f"API_CLIENT ERROR in check_coin_availability for {symbol}: {e}", file=sys.stderr)
+        error_json = {}
+        try:
+            error_json = e.response.json()
+        except (ValueError, AttributeError):
+            pass
+        if "Invalid symbol" in error_json.get('msg', ''):
+            return False
+        return False
+    return False
+
+
+def fetch_ohlc_data(symbol, interval, market_type, limit=200):
+    """
+    Fetches OHLCV data from Binance. This version includes robust data cleaning
+    and proper error logging.
+    """
+    base_url = BINANCE_FUTURES_URL if market_type == "futures" else BINANCE_SPOT_URL
+    url = f"{base_url}/klines?symbol={symbol.upper()}&interval={interval}&limit={limit}"
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()  # Will raise an exception for 4xx/5xx errors
+        response_json = response.json()
+
+        if not isinstance(response_json, list):
+            # --- START OF KEY CHANGE: Improved Logging ---
+            print(f"API_CLIENT WARN in fetch_ohlc_data for {symbol}: API returned a non-list object.", file=sys.stderr)
+            print(f"URL: {url}", file=sys.stderr)
+            print(f"Full Response: {response_json}", file=sys.stderr)  # THIS WILL SHOW US THE ERROR
+            return None
+            # --- END OF KEY CHANGE ---
+
+        if len(response_json) == 0:
+            print(f"API_CLIENT WARN in fetch_ohlc_data for {symbol}: API returned an empty list.", file=sys.stderr)
+            return None
+
+        df = pd.DataFrame(response_json, columns=[
+            "timestamp", "open", "high", "low", "close", "volume", "close_time",
+            "quote_asset_volume", "trades", "taker_buy_base_asset_volume",
+            "taker_buy_quote_asset_volume", "ignore"
+        ])
+        numeric_cols = ["open", "high", "low", "close", "volume", "quote_asset_volume"]
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        df.dropna(subset=numeric_cols, inplace=True)
+        return df if not df.empty else None
+    except (requests.exceptions.RequestException, ValueError) as e:
+        # ADDED LOGGING
+        print(f"API_CLIENT ERROR in fetch_ohlc_data for {symbol}: {e}", file=sys.stderr)
+        return None
+
+
+def get_current_price(symbol, market_type):
+    """Gets the current price for a symbol."""
+    base_url = BINANCE_FUTURES_URL if market_type == "futures" else BINANCE_SPOT_URL
+    url = f"{base_url}/ticker/price?symbol={symbol.upper()}"
+    try:
+        response = requests.get(url, timeout=10).json()
+        return float(response["price"])
+    except Exception as e:
+        # ADDED LOGGING
+        print(f"API_CLIENT ERROR in get_current_price for {symbol}: {e}", file=sys.stderr)
+        return None
+
+
+def fetch_24hr_stats(symbol, market_type):
+    """Fetches 24-hour ticker statistics."""
+    base_url = BINANCE_FUTURES_URL if market_type == "futures" else BINANCE_SPOT_URL
+    url = f"{base_url}/ticker/24hr?symbol={symbol.upper()}"
+    try:
+        return requests.get(url, timeout=10).json()
+    except Exception as e:
+        # ADDED LOGGING
+        print(f"API_CLIENT ERROR in fetch_24hr_stats for {symbol}: {e}", file=sys.stderr)
+        return None
+
+
+def fetch_fng_index():
+    """Fetches the Fear and Greed Index."""
+    try:
+        response = requests.get(FNG_API_URL, timeout=10).json()
+        return int(response["data"][0]["value"])
+    except Exception as e:
+        # ADDED LOGGING
+        print(f"API_CLIENT ERROR in fetch_fng_index: {e}", file=sys.stderr)
+        return None
+
+
+def fetch_order_book(symbol, market_type):  # <<< Added market_type parameter
+    """Fetches the order book."""
+    # --- BUG FIX: Use the correct URL for spot vs futures ---
+    base_url = BINANCE_FUTURES_URL if market_type == "futures" else BINANCE_SPOT_URL
+    url = f"{base_url}/depth?symbol={symbol.upper()}&limit=500"
+    try:
+        return requests.get(url, timeout=10).json()
+    except Exception as e:
+        # ADDED LOGGING
+        print(f"API_CLIENT ERROR in fetch_order_book for {symbol}: {e}", file=sys.stderr)
+        return None
+
+
+def fetch_open_interest(symbol):
+    """Fetches open interest for a futures symbol."""
+    url = f"{BINANCE_FUTURES_URL}/openInterest?symbol={symbol.upper()}"
+    try:
+        response = requests.get(url, timeout=10).json()
+        return float(response.get("openInterest", 0))
+    except Exception as e:
+        # ADDED LOGGING
+        print(f"API_CLIENT ERROR in fetch_open_interest for {symbol}: {e}", file=sys.stderr)
+        return None
+
+
+def fetch_funding_rate(symbol):
+    """Fetches the latest funding rate for a futures symbol."""
+    url = f"{BINANCE_FUTURES_URL}/premiumIndex?symbol={symbol.upper()}"
+    try:
+        response = requests.get(url, timeout=10).json()
+        # Handle cases where a specific symbol might not have a funding rate returned
+        if isinstance(response, list) and len(response) > 0:
+            return float(response[0].get("lastFundingRate", 0))
+        elif isinstance(response, dict):
+            return float(response.get("lastFundingRate", 0))
+        else:
+            print(f"API_CLIENT WARN in fetch_funding_rate for {symbol}: Unexpected response format {response}",
+                  file=sys.stderr)
+            return 0
+    except Exception as e:
+        # ADDED LOGGING
+        print(f"API_CLIENT ERROR in fetch_funding_rate for {symbol}: {e}", file=sys.stderr)
+        return None
+
+
+def fetch_long_short_ratio(symbol):
+    supported_periods = ['1h', '4h', '12h', '1d', '5m', '15m', '30m']
+    for period in supported_periods:
+        url = f"{BINANCE_FUTURES_URL}/globalLongShortAccountRatio?symbol={symbol.upper()}&period={period}&limit=1"
+        try:
+            response = requests.get(url, timeout=5).json()
+            if response and isinstance(response, list) and 'longShortRatio' in response[0]:
+                return float(response[0]["longShortRatio"])
+        except (requests.exceptions.RequestException, IndexError, KeyError, ValueError) as e:
+            # ADDED LOGGING (but only on the last attempt)
+            if period == supported_periods[-1]:
+                print(f"API_CLIENT ERROR in fetch_long_short_ratio for {symbol} after trying all periods: {e}",
+                      file=sys.stderr)
+            continue
+    return None
+
+# --- END OF FILE api_client.py ---
+
+--- END OF FILE api_client.py ---
+
+
+--- START OF FILE indicators.py ---
+
+# --- START OF FULLY UPGRADED indicators.py ---
+import sys
+import pandas as pd
+import numpy as np
+from collections import defaultdict
+import random
+# Using python's built-in Type Hinting for cleaner code
+from typing import Dict, Any, Union, Optional, Tuple
+from scipy.signal import argrelextrema
+import pandas_ta as ta
+
+SMC_DEBUG_PRINTED_ONCE = False
+
+# --- DEPENDENCIES ---
+# This file will now depend on our new api_client.
+import api_client
+
+
+# === START OF PHASE 1 UPGRADE: MARKET REGIME FILTER ===
+
+def get_market_regime_advanced(df: pd.DataFrame) -> tuple[str, str]:
+    if df is None or len(df) < 200: return "Ranging", "Sideways"
+    try:
+        ema_50 = df.ta.ema(length=50)
+        ema_200 = df.ta.ema(length=200)
+        if ema_50 is None or ema_200 is None or ema_50.isna().all() or ema_200.isna().all():
+             return "Ranging", "Sideways"
+        is_bullish = ema_50.iloc[-1] > ema_200.iloc[-1]
+        is_bearish = ema_50.iloc[-1] < ema_200.iloc[-1]
+        adx_indicator = df.ta.adx(length=14)
+        if adx_indicator is None or adx_indicator.empty: return "Ranging", "Sideways"
+        is_trending = adx_indicator.iloc[-1]['ADX_14'] > 20
+        if is_trending:
+            if is_bullish: return "Trending", "Bullish"
+            if is_bearish: return "Trending", "Bearish"
+        return "Ranging", "Sideways"
+    except Exception:
+        return "Ranging", "Sideways"
+# === HELPER FUNCTIONS ===
+
+def format_price(price):
+    try:
+        price = float(price)
+        if pd.isna(price) or price == 0: return "0.00"
+        abs_price = abs(price)
+        if abs_price < 0.0001: return f"{price:.8f}".rstrip('0').rstrip('.')
+        if abs_price < 1: return f"{price:.4f}".rstrip('0').rstrip('.')
+        if abs_price < 1000: return f"{price:.2f}".rstrip('0').rstrip('.')
+        return f"{int(price):,}"
+    except (ValueError, TypeError):
+        return str(price)
+
+
+def find_key_levels(df, lookback=50):
+    if df is None or len(df) < lookback:
+        return {'recent_high': None, 'recent_low': None}
+    df_slice = df.tail(lookback).copy()
+    return {'recent_high': df_slice['high'].max(), 'recent_low': df_slice['low'].min()}
+
+
+# === ALL INDICATOR VERDICT FUNCTIONS (UPGRADED FOR ROBUSTNESS) ===
+
+WHALE_TRADE_THRESHOLD = 5
+
+
+def adx_verdict(df: pd.DataFrame | None, trade_type: str) -> dict:
+    if df is None or df.empty: return {"verdict": "error", "explanation": "ADX: No data provided."}
+    try:
+        adx_df = df.ta.adx()
+        if adx_df is None or adx_df.empty: return {"verdict": "error", "explanation": "ADX calculation failed."}
+        latest = adx_df.iloc[-1]
+        adx, plus_di, minus_di = latest['ADX_14'], latest['DMP_14'], latest['DMN_14']
+        verdict = "no"
+        explanation = f"ADX: {format_price(adx)} (Weak Trend)"
+        if pd.isna(adx) or pd.isna(plus_di) or pd.isna(minus_di): return {"verdict": "error",
+                                                                          "explanation": "ADX contains NaN values."}
+        if adx > 25:
+            explanation = f"ADX: {format_price(adx)} (Strong Trend)"
+            if trade_type == "long" and plus_di > minus_di:
+                verdict = "yes"
+            elif trade_type == "short" and minus_di > plus_di:
+                verdict = "yes"
+        return {"verdict": verdict, "explanation": explanation}
+    except Exception as e:
+        return {"verdict": "error", "explanation": f"ADX: An error occurred - {e}"}
+
+
+def ema_verdict(df: pd.DataFrame | None, trade_type: str) -> dict:
+    if df is None or len(df) < 200: return {"verdict": "error", "explanation": "EMA: Insufficient data."}
+    try:
+        ema50 = df.ta.ema(length=50).iloc[-1]
+        ema200 = df.ta.ema(length=200).iloc[-1]
+        if pd.isna(ema50) or pd.isna(ema200): return {"verdict": "error",
+                                                      "explanation": "EMA calculation resulted in NaN."}
+        verdict = "no"
+        explanation = f"EMA50: {format_price(ema50)}, EMA200: {format_price(ema200)}"
+        if trade_type == "long" and ema50 > ema200:
+            verdict, explanation = "yes", explanation + " (Bullish Crossover)"
+        elif trade_type == "short" and ema50 < ema200:
+            verdict, explanation = "yes", explanation + " (Bearish Crossover)"
+        return {"verdict": verdict, "explanation": explanation}
+    except Exception as e:
+        return {"verdict": "error", "explanation": f"EMA: An error occurred - {e}"}
+
+
+def netflow_verdict(ticker_data: dict | None, trade_type: str) -> dict:
+    if not ticker_data: return {"verdict": "error", "explanation": "Could not fetch 24hr stats."}
+    try:
+        asset_volume = float(ticker_data.get("volume", 0))
+        netflow = asset_volume * random.uniform(-0.1, 0.1)  # Simulated netflow
+        verdict = "no"
+        explanation = f"Approx. Net Flow: {format_price(netflow)}"
+        if trade_type == "long" and netflow < 0:
+            verdict, explanation = "yes", explanation + " (Outflow suggests accumulation)"
+        elif trade_type == "short" and netflow > 0:
+            verdict, explanation = "yes", explanation + " (Inflow suggests distribution)"
+        return {"verdict": verdict, "explanation": explanation}
+    except Exception as e:
+        return {"verdict": "error", "explanation": f"Netflow: An error occurred - {e}"}
+
+
+def sentiment_verdict(fng_value: int | None, trade_type: str) -> dict:
+    if not fng_value: return {"verdict": "error", "explanation": "Could not fetch F&G Index."}
+    verdict = "no"
+    if fng_value <= 25:
+        explanation = f"F&G Index: {fng_value} (Extreme Fear)"
+        if trade_type == "long": verdict = "yes"
+    elif fng_value >= 75:
+        explanation = f"F&G Index: {fng_value} (Extreme Greed)"
+        if trade_type == "short": verdict = "yes"
+    else:
+        explanation = f"F&G Index: {fng_value} (Neutral)"
+    return {"verdict": verdict, "explanation": explanation}
+
+
+def miner_verdict() -> dict:
+    try:
+        netflow = random.uniform(-1000, 1000)
+        explanation = f"Simulated Miner Flow: {format_price(netflow)}"
+        verdict = "yes" if netflow < 0 else "no"
+        explanation += " (Holding)" if verdict == "yes" else " (Selling)"
+        return {"verdict": verdict, "explanation": explanation}
+    except Exception as e:
+        return {"verdict": "error", "explanation": f"Miner: An error occurred - {e}"}
+
+
+def macd_verdict(df: pd.DataFrame | None, trade_type: str) -> dict:
+    if df is None or df.empty: return {"verdict": "error", "explanation": "MACD: No data provided."}
+    try:
+        macd_df = df.ta.macd()
+        if macd_df is None or macd_df.empty: return {"verdict": "error", "explanation": "MACD calculation failed."}
+        latest = macd_df.iloc[-1]
+        macd_line, signal_line = latest['MACD_12_26_9'], latest['MACDs_12_26_9']
+        if pd.isna(macd_line) or pd.isna(signal_line): return {"verdict": "error", "explanation": "MACD contains NaN."}
+        verdict = "no"
+        explanation = f"MACD: {format_price(macd_line)}, Signal: {format_price(signal_line)}"
+        if trade_type == "long" and macd_line > signal_line:
+            verdict, explanation = "yes", explanation + " (Bullish Crossover)"
+        elif trade_type == "short" and macd_line < signal_line:
+            verdict, explanation = "yes", explanation + " (Bearish Crossover)"
+        return {"verdict": verdict, "explanation": explanation}
+    except Exception as e:
+        return {"verdict": "error", "explanation": f"MACD: An error occurred - {e}"}
+
+
+def rsi_verdict(df: pd.DataFrame, trade_type: str) -> dict:
+    if df is None or df.empty: return {"verdict": "error", "explanation": "RSI: No data."}
+    try:
+        rsi = df.ta.rsi().iloc[-1]
+        if pd.isna(rsi): return {"verdict": "error", "explanation": "RSI is NaN."}
+        verdict = "no"
+        if rsi < 30 and trade_type == "long": verdict = "yes"; explanation = f"RSI: {rsi:.2f} (Oversold)"
+        elif rsi > 70 and trade_type == "short": verdict = "yes"; explanation = f"RSI: {rsi:.2f} (Overbought)"
+        else: explanation = f"RSI: {rsi:.2f} (Neutral)"
+        return {"verdict": verdict, "explanation": explanation}
+    except Exception:
+        return {"verdict": "error", "explanation": "RSI Error"}
+
+
+def stoch_rsi_verdict(df: pd.DataFrame | None, trade_type: str) -> dict:
+    if df is None or df.empty: return {"verdict": "error", "explanation": "StochRSI: No data provided."}
+    try:
+        stoch_rsi_series = df.ta.stochrsi()
+        if stoch_rsi_series is None or stoch_rsi_series.empty: return {"verdict": "error",
+                                                                       "explanation": "StochRSI calculation failed."}
+        stoch_rsi = stoch_rsi_series.iloc[-1]['STOCHRSIk_14_14_3_3']
+        if pd.isna(stoch_rsi): return {"verdict": "error", "explanation": "StochRSI calculation is NaN."}
+        verdict = "no"
+        if stoch_rsi < 20:
+            explanation = f"StochRSI: {format_price(stoch_rsi)} (Oversold)"
+            if trade_type == "long": verdict = "yes"
+        elif stoch_rsi > 80:
+            explanation = f"StochRSI: {format_price(stoch_rsi)} (Overbought)"
+            if trade_type == "short": verdict = "yes"
+        else:
+            explanation = f"StochRSI: {format_price(stoch_rsi)} (Neutral)"
+        return {"verdict": verdict, "explanation": explanation}
+    except Exception as e:
+        return {"verdict": "error", "explanation": f"StochRSI: An error occurred - {e}"}
+
+
+def whale_verdict(order_book: dict | None, trade_type: str, market_type: str) -> dict:
+    if not order_book: return {"verdict": "error", "explanation": "Could not fetch order book."}
+    try:
+        bids = [(float(p), float(q)) for p, q in order_book.get("bids", [])]
+        asks = [(float(p), float(q)) for p, q in order_book.get("asks", [])]
+        large_buys = sum(q for p, q in bids if q > WHALE_TRADE_THRESHOLD)
+        large_sells = sum(q for p, q in asks if q > WHALE_TRADE_THRESHOLD)
+        verdict = "no"
+        explanation = f"Whale Buys: {format_price(large_buys)}, Sells: {format_price(large_sells)}"
+        if trade_type == "long" and large_buys > large_sells * 1.5:
+            verdict, explanation = "yes", explanation + " (Buy pressure)"
+        elif trade_type == "short" and large_sells > large_buys * 1.5:
+            verdict, explanation = "yes", explanation + " (Sell pressure)"
+        return {"verdict": verdict, "explanation": explanation}
+    except Exception as e:
+        return {"verdict": "error", "explanation": f"Whale: An error occurred - {e}"}
+
+
+def support_resistance_verdict(df: pd.DataFrame | None, trade_type: str) -> dict:
+    if df is None or len(df) < 50: return {"verdict": "error", "explanation": "S/R: Insufficient data."}
+    try:
+        recent_data = df.iloc[-50:]
+        support = recent_data['low'].min()
+        resistance = recent_data['high'].max()
+        current_price = df['close'].iloc[-1]
+        verdict = "no"
+        explanation = f"Support: {format_price(support)}, Resistance: {format_price(resistance)}"
+        if trade_type == "long" and current_price <= support * 1.02:
+            verdict, explanation = "yes", explanation + " (Near support)"
+        elif trade_type == "short" and current_price >= resistance * 0.98:
+            verdict, explanation = "yes", explanation + " (Near resistance)"
+        return {"verdict": verdict, "explanation": explanation}
+    except Exception as e:
+        return {"verdict": "error", "explanation": f"S/R: An error occurred - {e}"}
+
+
+def volume_profile_verdict(df: pd.DataFrame | None, trade_type: str) -> dict:
+    if df is None or df.empty: return {"verdict": "error", "explanation": "Vol Profile: No data provided."}
+    try:
+        # Note: pandas_ta 'vp' can be slow. A dedicated library might be better for production.
+        vp = df.ta.vp(width=10)
+        if vp is None or vp.empty: return {"verdict": "error", "explanation": "Vol Profile calculation failed."}
+        vpoc = vp.iloc[-1, 0]
+        current_price = df['close'].iloc[-1]
+        verdict = "no"
+        explanation = f"Volume POC: {format_price(vpoc)}"
+        if pd.isna(vpoc): return {"verdict": "error", "explanation": "Vol Profile POC is NaN."}
+        if trade_type == "long" and current_price >= vpoc:
+            verdict, explanation = "yes", explanation + " (Above high volume node)"
+        elif trade_type == "short" and current_price <= vpoc:
+            verdict, explanation = "yes", explanation + " (Below high volume node)"
+        return {"verdict": verdict, "explanation": explanation}
+    except Exception as e:
+        return {"verdict": "error", "explanation": f"Vol Profile: An error occurred - {e}"}
+
+
+def market_structure_verdict(df: pd.DataFrame | None, trade_type: str) -> dict:
+    if df is None or len(df) < 50: return {"verdict": "no", "explanation": "Not enough market structure to analyze."}
+    try:
+        df_slice = df.tail(50).copy()
+
+        df_slice['swing_high'] = (df_slice['high'] > df_slice['high'].shift(1)) & (
+                df_slice['high'] > df_slice['high'].shift(-1))
+        df_slice['swing_low'] = (df_slice['low'] < df_slice['low'].shift(1)) & (
+                df_slice['low'] < df_slice['low'].shift(-1))
+
+        swing_highs = df_slice[df_slice['swing_high']]['high']
+        swing_lows = df_slice[df_slice['swing_low']]['low']
+
+        if len(swing_highs) < 2 or len(swing_lows) < 2:
+            return {"verdict": "no", "explanation": "Not enough market structure to analyze."}
+
+        last_swing_high, prev_swing_high = swing_highs.iloc[-1], swing_highs.iloc[-2]
+        last_swing_low, prev_swing_low = swing_lows.iloc[-1], swing_lows.iloc[-2]
+        current_price = df_slice['close'].iloc[-1]
+
+        is_bullish_bos = current_price > last_swing_high and last_swing_high > prev_swing_high
+        is_bearish_bos = current_price < last_swing_low and last_swing_low < prev_swing_low
+        is_bullish_choch = current_price > last_swing_high
+        is_bearish_choch = current_price < last_swing_low
+
+        explanation_parts = []
+        verdict = "no"
+
+        if trade_type == "long":
+            if is_bullish_bos:
+                explanation_parts.append("Bullish BoS confirmed."); verdict = "yes"
+            elif is_bullish_choch and not is_bearish_bos:
+                explanation_parts.append("Potential Bullish ChoCh."); verdict = "yes"
+            else:
+                explanation_parts.append("No clear bullish structure break.")
+        elif trade_type == "short":
+            if is_bearish_bos:
+                explanation_parts.append("Bearish BoS confirmed."); verdict = "yes"
+            elif is_bearish_choch and not is_bullish_bos:
+                explanation_parts.append("Potential Bearish ChoCh."); verdict = "yes"
+            else:
+                explanation_parts.append("No clear bearish structure break.")
+
+        df_slice['fvg_high'] = df_slice['low'].shift(1)
+        df_slice['fvg_low'] = df_slice['high'].shift(-1)
+        bullish_fvgs = df_slice[(df_slice['high'] < df_slice['fvg_high'])]
+        bearish_fvgs = df_slice[(df_slice['low'] > df_slice['fvg_low'])]
+
+        if not bullish_fvgs.empty:
+            explanation_parts.append(f"Nearest Bullish FVG (support) at {format_price(bullish_fvgs['high'].iloc[-1])}.")
+        if not bearish_fvgs.empty:
+            explanation_parts.append(
+                f"Nearest Bearish FVG (resistance) at {format_price(bearish_fvgs['low'].iloc[-1])}.")
+
+        return {"verdict": verdict, "explanation": " | ".join(explanation_parts)}
+    except Exception as e:
+        return {"verdict": "error", "explanation": f"Market Structure: An error occurred - {e}"}
+
+
+# --- 8 NEW INDICATORS (upgraded) ---
+
+def bollinger_bands_verdict(df, trade_type):
+    if df is None or len(df) < 20: return {"verdict": "error", "explanation": "BBands: Insufficient data."}
+    try:
+        bbands = df.ta.bbands(length=20)
+        if bbands is None or bbands.empty: return {"verdict": "error", "explanation": "BBands calculation failed."}
+        latest_close = df['close'].iloc[-1]
+        lower_band, upper_band = bbands['BBL_20_2.0'].iloc[-1], bbands['BBU_20_2.0'].iloc[-1]
+        verdict = "no"
+        explanation = f"Lower: {format_price(lower_band)}, Upper: {format_price(upper_band)}"
+        if trade_type == "long" and latest_close <= lower_band:
+            verdict, explanation = "yes", explanation + " (Price at/below lower band)"
+        elif trade_type == "short" and latest_close >= upper_band:
+            verdict, explanation = "yes", explanation + " (Price at/above upper band)"
+        return {"verdict": verdict, "explanation": explanation}
+    except Exception as e:
+        return {"verdict": "error", "explanation": f"BBands: An error occurred - {e}"}
+
+
+def parabolic_sar_verdict(df, trade_type):
+    if df is None or df.empty: return {"verdict": "error", "explanation": "PSAR: No data provided."}
+    try:
+        psar = df.ta.psar()
+        if psar is None or psar.empty: return {"verdict": "error", "explanation": "PSAR calculation failed."}
+        latest_psar = psar.iloc[-1]['PSARl_0.02_0.2'] if 'PSARl_0.02_0.2' in psar.columns and pd.notna(
+            psar.iloc[-1]['PSARl_0.02_0.2']) else psar.iloc[-1]['PSARs_0.02_0.2']
+        latest_close = df['close'].iloc[-1]
+        verdict = "no"
+        explanation = f"PSAR: {format_price(latest_psar)}"
+        if trade_type == "long" and latest_close > latest_psar:
+            verdict, explanation = "yes", explanation + " (PSAR is below price)"
+        elif trade_type == "short" and latest_close < latest_psar:
+            verdict, explanation = "yes", explanation + " (PSAR is above price)"
+        return {"verdict": verdict, "explanation": explanation}
+    except Exception as e:
+        return {"verdict": "error", "explanation": f"PSAR: An error occurred - {e}"}
+
+
+def ichimoku_cloud_verdict(df, trade_type):
+    if df is None or df.empty: return {"verdict": "error", "explanation": "Ichimoku: No data provided."}
+    try:
+        ichimoku = df.ta.ichimoku()[0]
+        if ichimoku is None or ichimoku.empty: return {"verdict": "error",
+                                                       "explanation": "Ichimoku calculation failed."}
+        latest_close = df['close'].iloc[-1]
+        span_a, span_b = ichimoku.iloc[-1]['ISA_9'], ichimoku.iloc[-1]['ISB_26']
+        verdict = "no"
+        explanation = f"Cloud: {format_price(span_a)} - {format_price(span_b)}"
+        if trade_type == "long" and latest_close > span_a and latest_close > span_b:
+            verdict, explanation = "yes", explanation + " (Price above cloud)"
+        elif trade_type == "short" and latest_close < span_a and latest_close < span_b:
+            verdict, explanation = "yes", explanation + " (Price below cloud)"
+        return {"verdict": verdict, "explanation": explanation}
+    except Exception as e:
+        return {"verdict": "error", "explanation": f"Ichimoku: An error occurred - {e}"}
+
+
+def on_balance_volume_verdict(df, trade_type):
+    if df is None or df.empty: return {"verdict": "error", "explanation": "OBV: No data provided."}
+    try:
+        obv = df.ta.obv()
+        if obv is None or obv.empty: return {"verdict": "error", "explanation": "OBV calculation failed."}
+        df['obv'] = obv
+        obv_ema5 = df['obv'].ewm(span=5).mean()
+        obv_ema20 = df['obv'].ewm(span=20).mean()
+        verdict = "no"
+        explanation = "OBV trend is neutral"
+        if trade_type == "long" and obv_ema5.iloc[-1] > obv_ema20.iloc[-1]:
+            verdict, explanation = "yes", "OBV trend is bullish"
+        elif trade_type == "short" and obv_ema5.iloc[-1] < obv_ema20.iloc[-1]:
+            verdict, explanation = "yes", "OBV trend is bearish"
+        return {"verdict": verdict, "explanation": explanation}
+    except Exception as e:
+        return {"verdict": "error", "explanation": f"OBV: An error occurred - {e}"}
+
+
+def macd_histogram_verdict(df, trade_type):
+    if df is None or len(df) < 2: return {"verdict": "error", "explanation": "MACD Hist: Insufficient data."}
+    try:
+        macd_df = df.ta.macd()
+        if macd_df is None or macd_df.empty: return {"verdict": "error", "explanation": "MACD Hist calculation failed."}
+        hist = macd_df.iloc[-2:]['MACDh_12_26_9'].values
+        if len(hist) < 2: return {"verdict": "error", "explanation": "MACD Hist needs at least 2 values."}
+        verdict = "no"
+        explanation = f"Histogram: {format_price(hist[-1])}"
+        if trade_type == "long" and hist[-1] > 0 and hist[-1] > hist[-2]:
+            verdict, explanation = "yes", explanation + " (Growing bullish momentum)"
+        elif trade_type == "short" and hist[-1] < 0 and hist[-1] < hist[-2]:
+            verdict, explanation = "yes", explanation + " (Growing bearish momentum)"
+        return {"verdict": verdict, "explanation": explanation}
+    except Exception as e:
+        return {"verdict": "error", "explanation": f"MACD Hist: An error occurred - {e}"}
+
+
+# --- FUTURES-SPECIFIC INDICATORS (upgraded) ---
+
+def open_interest_verdict(open_interest_data: float | None, df: pd.DataFrame | None, trade_type: str) -> dict:
+    if open_interest_data is None: return {"verdict": "error", "explanation": "Could not fetch Open Interest."}
+    if df is None or len(df) < 2: return {"verdict": "error", "explanation": "OI: Insufficient price data."}
+    try:
+        price_change = (df['close'].iloc[-1] / df['close'].iloc[-2] - 1) * 100
+        verdict = "no"
+        explanation = f"OI: {format_price(open_interest_data)}, Price Change: {price_change:.2f}%"
+        if trade_type == "long" and price_change > 0:
+            verdict, explanation = "yes", explanation + " (OI confirms bullish price move)"
+        elif trade_type == "short" and price_change < 0:
+            verdict, explanation = "yes", explanation + " (OI confirms bearish price move)"
+        return {"verdict": verdict, "explanation": explanation}
+    except Exception as e:
+        return {"verdict": "error", "explanation": f"OI: An error occurred - {e}"}
+
+
+def funding_rate_verdict(funding_rate: float | None, trade_type: str) -> dict:
+    if funding_rate is None: return {"verdict": "error", "explanation": "Could not fetch Funding Rate."}
+    try:
+        fr = funding_rate * 100
+        verdict = "no"
+        explanation = f"Funding Rate: {fr:.4f}%"
+        if trade_type == "long" and fr <= 0.01:
+            verdict, explanation = "yes", explanation + " (Neutral/Negative, bullish)"
+        elif trade_type == "short" and fr > 0.02:
+            verdict, explanation = "yes", explanation + " (High positive, bearish)"
+        return {"verdict": verdict, "explanation": explanation}
+    except Exception as e:
+        return {"verdict": "error", "explanation": f"Funding Rate: An error occurred - {e}"}
+
+
+def liquidation_levels_verdict(df: pd.DataFrame | None, trade_type: str) -> dict:
+    if df is None or len(df) < 10: return {"verdict": "error", "explanation": "Liq Levels: Insufficient data."}
+    try:
+        recent_low, recent_high = df['low'].iloc[-10:].min(), df['high'].iloc[-10:].max()
+        current_price = df['close'].iloc[-1]
+        verdict = "no"
+        explanation = f"Recent Low: {format_price(recent_low)}, High: {format_price(recent_high)}"
+        if trade_type == "long" and (current_price - recent_low) / recent_low < 0.01:
+            verdict, explanation = "yes", explanation + " (Near short-term liq zone)"
+        elif trade_type == "short" and (recent_high - current_price) / recent_high < 0.01:
+            verdict, explanation = "yes", explanation + " (Near short-term liq zone)"
+        return {"verdict": verdict, "explanation": explanation}
+    except Exception as e:
+        return {"verdict": "error", "explanation": f"Liq Levels: An error occurred - {e}"}
+
+
+def htf_trend_alignment_verdict(symbol: str, timeframe: str, market_type: str, trade_type: str) -> dict:
+    timeframe_map = {'1m': '5m', '3m': '15m', '5m': '15m', '15m': '1h', '30m': '1h', '1h': '4h', '2h': '4h', '4h': '1d',
+                     '6h': '1d', '8h': '1d', '12h': '1d', '1d': '3d', '3d': '1w', '1w': '1M'}
+    htf = timeframe_map.get(timeframe)
+    if not htf: return {"verdict": "no", "explanation": f"No HTF mapping for {timeframe}."}
+
+    htf_df = api_client.fetch_ohlc_data(symbol, htf, market_type, limit=200)
+
+    if htf_df is None or len(htf_df) < 55: return {"verdict": "error",
+                                                   "explanation": f"Could not fetch data for HTF ({htf})."}
+
+    try:
+        ema_fast = htf_df.ta.ema(length=21).iloc[-1]
+        ema_slow = htf_df.ta.ema(length=55).iloc[-1]
+        htf_is_bullish = ema_fast > ema_slow
+        verdict = "no"
+        if trade_type == "long" and htf_is_bullish:
+            verdict = "yes"
+        elif trade_type == "short" and not htf_is_bullish:
+            verdict = "yes"
+        trend_direction = "Bullish" if htf_is_bullish else "Bearish"
+        explanation = f"HTF ({htf}) trend is {trend_direction}. Verdict: {'Aligned' if verdict == 'yes' else 'Not Aligned'}"
+        return {"verdict": verdict, "explanation": explanation}
+    except Exception as e:
+        return {"verdict": "error", "explanation": f"HTF Trend: An error occurred - {e}"}
+
+
+# --- START OF NEW DIVERGENCE FUNCTIONS (add to the end of indicators.py) ---
+
+def find_divergence(price_series: pd.Series, indicator_series: pd.Series, lookback: int = 40) -> str:
+    if price_series is None or indicator_series is None or len(price_series) < lookback: return "None"
+    try:
+        df = pd.DataFrame({'price': price_series, 'indicator': indicator_series}).tail(lookback)
+        if df.isnull().values.any(): return "None"
+        lows_price_idx = argrelextrema(df['price'].values, np.less, order=5)[0]
+        lows_indicator_idx = argrelextrema(df['indicator'].values, np.less, order=5)[0]
+        highs_price_idx = argrelextrema(df['price'].values, np.greater, order=5)[0]
+        highs_indicator_idx = argrelextrema(df['indicator'].values, np.greater, order=5)[0]
+        if len(lows_price_idx) >= 2 and len(lows_indicator_idx) >= 2:
+            if df['price'].iloc[lows_price_idx[-1]] < df['price'].iloc[lows_price_idx[-2]] and df['indicator'].iloc[lows_indicator_idx[-1]] > df['indicator'].iloc[lows_indicator_idx[-2]]: return "Bullish"
+        if len(highs_price_idx) >= 2 and len(highs_indicator_idx) >= 2:
+            if df['price'].iloc[highs_price_idx[-1]] > df['price'].iloc[highs_price_idx[-2]] and df['indicator'].iloc[highs_indicator_idx[-1]] < df['indicator'].iloc[highs_indicator_idx[-2]]: return "Bearish"
+    except Exception: return "None"
+    return "None"
+
+
+def rsi_divergence_verdict(df: pd.DataFrame, trade_type: str) -> dict:
+    if df is None or df.empty or len(df) < 50: return {"verdict": "error", "explanation": "RSI Div: No data."}
+    try:
+        rsi_series = df.ta.rsi()
+        if rsi_series is None: return {"verdict": "error", "explanation": "RSI failed."}
+        divergence_type = find_divergence(df['close'], rsi_series)
+        verdict = "no"
+        if (trade_type == "long" and divergence_type == "Bullish") or (trade_type == "short" and divergence_type == "Bearish"): verdict = "yes"
+        return {"verdict": verdict, "explanation": f"RSI Divergence: {divergence_type}"}
+    except Exception:
+        return {"verdict": "error", "explanation": "RSI Div Error"}
+
+
+
+def macd_divergence_verdict(df: pd.DataFrame | None, trade_type: str) -> dict:
+    """Checks for bullish or bearish divergence on the MACD Line."""
+    if df is None or df.empty or len(df) < 50:
+        return {"verdict": "error", "explanation": "MACD Div: Not enough data."}
+    try:
+        macd_df = df.ta.macd()
+        if macd_df is None or macd_df.empty:
+            return {"verdict": "error", "explanation": "MACD calculation failed."}
+
+        macd_line = macd_df['MACD_12_26_9']
+        divergence_type = find_divergence(df['close'], macd_line)
+
+        verdict = "no"
+        if (trade_type == "long" and divergence_type == "Bullish") or \
+                (trade_type == "short" and divergence_type == "Bearish"):
+            verdict = "yes"
+
+        return {"verdict": verdict, "explanation": f"MACD Divergence: {divergence_type}"}
+    except Exception as e:
+        return {"verdict": "error", "explanation": f"MACD Div Error: {e}"}
+
+
+# --- END OF NEW DIVERGENCE FUNCTIONS ---
+
+
+def long_short_ratio_verdict(long_short_ratio: float | None, trade_type: str) -> dict:
+    if long_short_ratio is None or long_short_ratio == 0: return {"verdict": "error",
+                                                                  "explanation": "Could not fetch L/S Ratio."}
+    verdict, explanation = "no", f"L/S Ratio: {long_short_ratio:.2f}"
+    if trade_type == "long" and long_short_ratio < 0.75:
+        verdict, explanation = "yes", explanation + " (Very bearish, contrarian long)"
+    elif trade_type == "short" and long_short_ratio > 2.0:
+        verdict, explanation = "yes", explanation + " (Very bullish, contrarian short)"
+    return {"verdict": verdict, "explanation": explanation}
+
+
+def relative_strength_verdict(symbol: str, timeframe: str, market_type: str, trade_type: str) -> dict:
+    if 'BTC' in symbol or 'ETH' in symbol or not ('USDT' in symbol or 'BUSD' in symbol): return {"verdict": "no",
+                                                                                                 "explanation": "N/A for BTC/ETH."}
+    base_asset = symbol.replace("USDT", "").replace("BUSD", "")
+    rs_pair = f"{base_asset}BTC"
+
+    # Check availability to avoid unnecessary API calls
+    if not api_client.check_coin_availability(rs_pair, "spot"):
+        return {"verdict": "error", "explanation": f"Relative strength pair {rs_pair} not available."}
+
+    rs_df = api_client.fetch_ohlc_data(rs_pair, timeframe, "spot", limit=100)
+    if rs_df is None or len(rs_df) < 55: return {"verdict": "error",
+                                                 "explanation": f"Could not fetch data for {rs_pair}."}
+
+    try:
+        ema_fast, ema_slow = rs_df.ta.ema(length=21).iloc[-1], rs_df.ta.ema(length=55).iloc[-1]
+        is_strong = ema_fast > ema_slow
+        verdict = "no"
+        if trade_type == 'long' and is_strong:
+            verdict, explanation = "yes", f"{base_asset} is showing strength vs BTC."
+        elif trade_type == 'short' and not is_strong:
+            verdict, explanation = "yes", f"{base_asset} is showing weakness vs BTC."
+        else:
+            explanation = f"{base_asset} performance vs BTC is neutral or misaligned."
+        return {"verdict": verdict, "explanation": explanation}
+    except Exception as e:
+        return {"verdict": "error", "explanation": f"RS: An error occurred - {e}"}
+
+
+# --- REMAINING FUNCTIONS (upgraded) ---
+
+def htf_bias_confirmation_verdict(bias_directions, trade_type):
+    if not bias_directions:
+        return {"verdict": "no", "explanation": "No HTF bias provided."}
+    is_bullish, is_bearish = all(d == "Bullish" for d in bias_directions), all(d == "Bearish" for d in bias_directions)
+    verdict, explanation = "no", f"HTF bias ({len(bias_directions)} TFs) is conflicting or misaligned."
+    if trade_type == "long" and is_bullish:
+        verdict, explanation = "yes", "HTF bias is unanimously bullish."
+    elif trade_type == "short" and is_bearish:
+        verdict, explanation = "yes", "HTF bias is unanimously bearish."
+    return {"verdict": verdict, "explanation": explanation}
+
+
+def get_htf_target(symbol, timeframe, market_type, trade_type):
+    timeframe_map = {'1m': '15m', '3m': '15m', '5m': '1h', '15m': '4h', '30m': '4h', '1h': '4h', '2h': '1d', '4h': '1d',
+                     '1d': '1w'}
+    htf = timeframe_map.get(timeframe, '1d')
+    htf_df = api_client.fetch_ohlc_data(symbol, htf, market_type, limit=200)
+    if htf_df is None or htf_df.empty: return None
+    try:
+        current_price = htf_df['close'].iloc[-1]
+        htf_df['is_sw_high'] = (htf_df['high'] > htf_df['high'].shift(1)) & (htf_df['high'] > htf_df['high'].shift(-1))
+        htf_df['is_sw_low'] = (htf_df['low'] < htf_df['low'].shift(1)) & (htf_df['low'] < htf_df['low'].shift(-1))
+        swing_highs, swing_lows = htf_df[htf_df['is_sw_high']]['high'], htf_df[htf_df['is_sw_low']]['low']
+        if trade_type == "long":
+            relevant_highs = swing_highs[swing_highs > current_price]
+            return relevant_highs.iloc[0] if not relevant_highs.empty else None
+        else:
+            relevant_lows = swing_lows[swing_lows < current_price]
+            return relevant_lows.iloc[-1] if not relevant_lows.empty else None
+    except Exception:
+        return None
+
+
+def analyze_price_action(candle: pd.Series, trade_type: str) -> bool:
+    try:
+        return candle['close'] > candle['open'] if trade_type == 'long' else candle['close'] < candle['open']
+    except Exception:
+        return False
+
+
+def analyze_candlestick_patterns(df_slice, trade_type: str) -> bool:
+    if df_slice is None or len(df_slice) < 3: return False
+    try:
+        c1, c2, c3 = df_slice.iloc[-3], df_slice.iloc[-2], df_slice.iloc[-1]
+        # Bullish Engulfing/Hammer
+        if trade_type == 'long':
+            if c3['close'] > c2['open'] and c3['open'] < c2['close']: return True  # Bullish Engulfing
+            body = abs(c3['close'] - c3['open']);
+            lower_wick = min(c3['open'], c3['close']) - c3['low']
+            if lower_wick > body * 2: return True  # Hammer
+        # Bearish Engulfing/Shooting Star
+        else:
+            if c3['close'] < c2['open'] and c3['open'] > c2['close']: return True  # Bearish Engulfing
+            body = abs(c3['close'] - c3['open']);
+            upper_wick = c3['high'] - max(c3['open'], c3['close'])
+            if upper_wick > body * 2: return True  # Shooting Star
+        return False
+    except Exception:
+        return False
+
+
+def analyze_volume(df_slice: pd.DataFrame) -> bool:
+    if df_slice is None or len(df_slice) < 21: return False
+    try: return df_slice['volume'].iloc[-1] > df_slice['volume'].iloc[-21:-1].mean() * 1.5
+    except Exception: return False
+
+
+def check_lower_timeframe_alignment(ltf_df: pd.DataFrame | None, trade_type: str) -> bool:
+    if ltf_df is None or len(ltf_df) < 21: return True  # Default to pass if no data
+    try:
+        ema_fast = ltf_df['close'].ewm(span=8, adjust=False).mean().iloc[-1]
+        ema_slow = ltf_df['close'].ewm(span=21, adjust=False).mean().iloc[-1]
+        if pd.isna(ema_fast) or pd.isna(ema_slow): return True
+        return ema_fast > ema_slow if trade_type == 'long' else ema_fast < ema_slow
+    except Exception:
+        return True
+
+
+def find_recent_swing_points(df: pd.DataFrame, current_index: int) -> dict:
+    """
+    --- HIGH-SPEED VERSION ---
+    Finds swing points by looking back from a specific index, not by slicing.
+    """
+    results = {'recent_high': None, 'recent_low': None}
+
+    # Ensure we don't look back past the start of the dataframe
+    if current_index < 55:
+        return results
+
+    # Define the period to search for the structural point using index positions
+    # We ignore the most recent 5 candles to avoid using the current price action itself.
+    start_lookback_idx = current_index - 50
+    end_lookback_idx = current_index - 5
+
+    search_space = df.iloc[start_lookback_idx:end_lookback_idx]
+
+    if not search_space.empty:
+        results['recent_low'] = search_space['low'].min()
+        results['recent_high'] = search_space['high'].max()
+
+    return results
+
+def get_ema_slope(series: pd.Series, length: int) -> float:
+    """Calculates the slope of an EMA over the last 5 periods."""
+    if series is None or len(series) < length + 5:
+        return 0.0
+    try:
+        ema = series.ewm(span=length, adjust=False).mean()
+        # Calculate the difference between the most recent EMA value and the value 5 periods ago
+        slope = ema.iloc[-1] - ema.iloc[-6]
+        return slope
+    except (IndexError, TypeError):
+        return 0.0
+
+
+def find_order_block(df_slice: pd.DataFrame, sweep_candle_index: int, trade_type: str) -> tuple | None:
+    """
+    Finds the order block that caused the break of structure after a liquidity sweep.
+    """
+    try:
+        # Define the search range after the sweep candle
+        search_df = df_slice.loc[sweep_candle_index:].copy()
+
+        if trade_type == 'long':
+            # For a LONG trade, the move after the sweep must break a recent high
+            swing_high_to_break = search_df['high'].iloc[0]
+
+            # Find the candle that breaks the structure
+            breakout_candles = search_df[search_df['high'] > swing_high_to_break]
+            if breakout_candles.empty:
+                return None
+
+            # Identify the move that led to the breakout
+            breakout_start_index = breakout_candles.index[0]
+            move_before_breakout = search_df.loc[:breakout_start_index]
+
+            # The Order Block is the last bearish candle within that move
+            opposing_candles = move_before_breakout[move_before_breakout['open'] > move_before_breakout['close']]
+            if opposing_candles.empty:
+                return None
+
+            # Return the range of the OB (low, high)
+            ob_candle = opposing_candles.iloc[-1]
+            return (ob_candle['low'], ob_candle['high'])
+
+        else:  # trade_type == 'short'
+            # For a SHORT trade, the move after the sweep must break a recent low
+            swing_low_to_break = search_df['low'].iloc[0]
+
+            # Find the candle that breaks the structure
+            breakout_candles = search_df[search_df['low'] < swing_low_to_break]
+            if breakout_candles.empty:
+                return None
+
+            # Identify the move that led to the breakout
+            breakout_start_index = breakout_candles.index[0]
+            move_before_breakout = search_df.loc[:breakout_start_index]
+
+            # The Order Block is the last bullish candle within that move
+            opposing_candles = move_before_breakout[move_before_breakout['close'] > move_before_breakout['open']]
+            if opposing_candles.empty:
+                return None
+
+            # Return the range of the OB (low, high)
+            ob_candle = opposing_candles.iloc[-1]
+            return (ob_candle['low'], ob_candle['high'])
+
+    except Exception:
+        return None
+
+
+# --- analyze_smc & generate_trade_plan (upgraded) ---
+def generate_trade_plan(df: pd.DataFrame, trade_type: str) -> dict:
+    plan: Dict[str, Any] = {'entry': {}, 'stop_losses': {}, 'targets': {}, 'management_suggestions': []}
+    if df is None or len(df) < 75: return plan
+
+    try:
+        current_price = df['close'].iloc[-1]
+        atr = df.ta.atr(length=14).iloc[-1]
+        if pd.isna(current_price) or pd.isna(atr): return plan
+
+        key_levels = find_key_levels(df, lookback=75)
+        htf_target = get_htf_target(df.name, df.attrs['timeframe'], df.attrs['market_type'], trade_type)
+
+        # Stop Loss
+        sl_options = {}
+        if trade_type == 'long':
+            if key_levels.get('recent_low') and key_levels['recent_low'] < current_price:
+                sl_options['structural'] = {'level': key_levels['recent_low'] - (atr * 0.1),
+                                            'reason': "Structural (Below Recent Low)"}
+            sl_options['volatility'] = {'level': current_price - (atr * 2.5), 'reason': "Volatility (2.5x ATR)"}
+        else:  # short
+            if key_levels.get('recent_high') and key_levels['recent_high'] > current_price:
+                sl_options['structural'] = {'level': key_levels['recent_high'] + (atr * 0.1),
+                                            'reason': "Structural (Above Recent High)"}
+            sl_options['volatility'] = {'level': current_price + (atr * 2.5), 'reason': "Volatility (2.5x ATR)"}
+        plan['stop_losses'] = sl_options
+
+        # Targets & R:R
+        # This section remains complex, for now we ensure it doesn't crash. Refinements in Phase 3.
+        # It calculates targets based on R:R, recent highs/lows, and HTF levels.
+        # This is placeholder logic to show robustness. We will upgrade this in Phase 3.
+        tp_risk_dist = abs(current_price - sl_options.get('volatility', {}).get('level', current_price))
+        if tp_risk_dist > 0:
+            plan['targets']['tp1'] = {
+                'level': current_price + (tp_risk_dist * 1.5) if trade_type == 'long' else current_price - (
+                        tp_risk_dist * 1.5), 'reason': "1:1.5 R/R"}
+
+        # Management
+        plan['management_suggestions'].append("Consider moving SL to Breakeven after TP1.")
+
+        return plan
+
+    except Exception as e:
+        print(f"INDICATORS ERROR in generate_trade_plan: {e}", file=sys.stderr)
+        return plan  # Return the empty plan on failure
+
+
+def analyze_smc_v2(df: pd.DataFrame, lookback: int = 50) -> Dict[str, Any]:
+    results = {"liquidity_sweep_signal": "None", "liquidity_sweep_signal_index": None, "recent_bullish_fvg": None,
+               "recent_bearish_fvg": None}
+    if df is None or len(df) < lookback: return results
+    try:
+        df_slice = df.tail(lookback).copy()
+        current_candle = df_slice.iloc[-1]
+        lookback_high, lookback_low = df_slice['high'].iloc[-21:-1].max(), df_slice['low'].iloc[-21:-1].min()
+
+        if current_candle['low'] < lookback_low and current_candle['close'] > lookback_low:
+            results['liquidity_sweep_signal'] = 'Bullish Sweep'
+            results['liquidity_sweep_signal_index'] = current_candle.name  # <-- ADD THIS LINE
+
+        if current_candle['high'] > lookback_high and current_candle['close'] < lookback_high:
+            results['liquidity_sweep_signal'] = 'Bearish Sweep'
+            results['liquidity_sweep_signal_index'] = current_candle.name  # <-- AND ADD THIS LINE
+
+        for i in range(len(df_slice) - 3, 0, -1):
+            c1, c2, c3 = df_slice.iloc[i - 1], df_slice.iloc[i], df_slice.iloc[i + 1]
+            if results['recent_bullish_fvg'] is None and c1['low'] > c3['high']: results['recent_bullish_fvg'] = (
+            c3['high'], c1['low'])
+            if results['recent_bearish_fvg'] is None and c1['high'] < c3['low']: results['recent_bearish_fvg'] = (
+            c1['high'], c3['low'])
+            if results['recent_bullish_fvg'] and results['recent_bearish_fvg']: break
+        return results
+    except Exception:
+        return results
+
+# --- END OF FULLY UPGRADED indicators.py ---
+
+
+
+--- END OF FILE indicators.py ---
+
+
+--- START OF FILE main.py ---
+
+# main.py
+# FINAL CORRECTED VERSION
+
+import pandas as pd
+from typing import Dict, Any, Optional
+import indicators
+
+# --- Baseline Settings ---
+# The optimizer will override these values during its runs.
+SMC_V2_SETTINGS = {
+    "mode_name": "SMC V2.1",
+    "entry_timeframe": '15m',
+    "score_threshold": 100,
+    "risk": {
+        "min_rr": 3.5,
+"risk_per_trade_percent": 2.0,
+"atr_buffer_multiplier": 1.2,
+"partial_tp_rr": 1.1,
+        "adx_threshold": 22
+    },
+    "costs": {
+        "trading_fee_percent": 0.04,  # Standard taker fee (0.04%) on many exchanges
+        "slippage_percent": 0.01       # A small slippage of 0.01%
+    }
+}
+
+
+def check_zone_overlap(candle_low, candle_high, zone_bottom, zone_top) -> bool:
+    if zone_bottom is None or zone_top is None: return False
+    if zone_bottom > zone_top: zone_bottom, zone_top = zone_top, zone_bottom
+    return candle_high >= zone_bottom and candle_low <= zone_top
+
+def get_confluence_score_optimized(entry_df: pd.DataFrame, current_index: int, trade_type: str, settings: Dict) -> Dict:
+    entry_candle, reasons = entry_df.iloc[current_index], []
+
+    if entry_candle['volume'] > entry_candle['volume_20_avg'] * 1.5:
+        reasons.append("Volume Spike")
+    else: return {"recommendation": "AVOID", "reason": "Failed: Low Volume"}
+    
+    rsi_value = entry_candle['RSI_14']
+    if pd.isna(rsi_value): return {"recommendation": "AVOID", "reason": "RSI is NaN"}
+
+    if (trade_type == "long" and rsi_value < 65) or (trade_type == "short" and rsi_value > 35):
+        reasons.append(f"RSI {rsi_value:.1f}")
+    else: return {"recommendation": "AVOID", "reason": f"Failed: RSI State ({rsi_value:.1f})"}
+    
+    final_reason = " | ".join(reasons)
+    return {"recommendation": "PROCEED", "reason": final_reason}
+
+
+def run_analysis_for_backtest(entry_df: pd.DataFrame, ltf_df: Optional[pd.DataFrame],
+                              trade_type: str, settings: Dict[str, Any], i: int):
+    default_response = {'final_report': {'recommendation': 'AVOID'}, 'trade_plan': {}}
+    if i < 200: return default_response
+
+    entry_candle = entry_df.iloc[i]
+    
+    is_4h_bias_long = entry_candle['4h_EMA_50'] > entry_candle['4h_EMA_200']
+    is_4h_bias_short = entry_candle['4h_EMA_50'] < entry_candle['4h_EMA_200']
+    ema_50_1h_slope = entry_candle['1h_EMA_50'] - entry_df['1h_EMA_50'].iloc[i - 5]
+
+    if (trade_type == 'long' and not (is_4h_bias_long and ema_50_1h_slope > 0)) or \
+       (trade_type == 'short' and not (is_4h_bias_short and ema_50_1h_slope < 0)):
+        return default_response
+        
+    poi_zone = None
+    for j in range(2, 12):
+        setup_idx = i - j
+        if setup_idx < 0: break
+        setup_candle = entry_df.iloc[setup_idx]
+        is_sweep = setup_candle['is_bullish_sweep'] if trade_type == 'long' else setup_candle['is_bearish_sweep']
+        if not is_sweep: continue
+        
+        poi_zone = (min(setup_candle['open'], setup_candle['close']), max(setup_candle['open'], setup_candle['close']))
+        if check_zone_overlap(entry_candle['low'], entry_candle['high'], poi_zone[0], poi_zone[1]):
+            break
+        else:
+            poi_zone = None
+            
+    if poi_zone is None: return default_response
+    
+    final_report = get_confluence_score_optimized(entry_df, i, trade_type, settings)
+    if final_report['recommendation'] == 'AVOID': return default_response
+
+    try:
+        structure = indicators.find_recent_swing_points(entry_df, i)
+        recent_low, recent_high = structure.get('recent_low'), structure.get('recent_high')
+        if not recent_low or not recent_high: return default_response
+
+        entry_price = entry_candle['close']
+        atr = entry_candle['ATRr_14']
+        if pd.isna(atr) or atr == 0: return default_response
+
+        atr_buffer = atr * settings['risk']['atr_buffer_multiplier']
+        sl = (recent_low - atr_buffer) if trade_type == 'long' else (recent_high + atr_buffer)
+        tp = recent_high if trade_type == 'long' else recent_low
+
+        if abs(entry_price - sl) <= 1e-8: return default_response
+        rr = abs(tp - entry_price) / abs(entry_price - sl)
+        
+        if rr < settings['risk']['min_rr']: return default_response
+
+        # --- Profit Potential Filter ---
+        profit_distance = abs(tp - entry_price)
+        if profit_distance < (3 * atr):
+            return default_response
+
+        tp1_dist = abs(entry_price - sl) * settings['risk']['partial_tp_rr']
+        tp1 = entry_price + tp1_dist if trade_type == 'long' else entry_price - tp1_dist
+        
+        # --- THE CORRECTED LINE IS HERE ---
+        trade_plan = {'entry_price': entry_price, 'stop_loss': sl, 'take_profit_1': tp1, 'take_profit_final': tp, 'risk_reward_ratio': round(rr, 2)}
+        return {'final_report': final_report, 'trade_plan': trade_plan}
+
+    except Exception:
+        pass
+    return default_response
+
+--- END OF FILE main.py ---
+
+
+--- START OF FILE backtester.py ---
+
+# backtester.py
+# FINAL, COMPLETE, and ROBUST CORE ENGINE
+
+import pandas as pd
+from tqdm import tqdm
+import os
+import main as strategy_engine
+import pandas_ta as ta
+
+# --- Core Globals ---
+DATA_FOLDER = "data"
+REQUIRED_TIMEFRAMES = {'15m': 'entry_df', '1h': 'htf_1h', '4h': 'htf_4h'}
+
+
+def load_local_data():
+    """
+    This function is now a generic loader for the simple backtest.
+    The optimizer/realism checker scripts will load data directly.
+    """
+    if not os.path.exists(DATA_FOLDER):
+        print(f"Error: '{DATA_FOLDER}' not found.")
+        return None
+    all_data = {}
+    default_symbol = "ETHUSDT" 
+    for timeframe, df_name in REQUIRED_TIMEFRAMES.items():
+        file_path = os.path.join(DATA_FOLDER, f"{default_symbol}-{timeframe}-data.csv")
+        if not os.path.exists(file_path):
+            print(f"Warning: Default data file for {default_symbol} not found: '{file_path}'. This is ok if running an optimizer.")
+            return {} 
+        all_data[df_name] = pd.read_csv(file_path, index_col='timestamp', parse_dates=True)
+    return all_data
+
+
+def precompute_smc_signals(df, settings):
+    """
+    Uses vectorized operations to find all Sweeps.
+    Is optimizer-aware and uses 'sweep_lookback' from settings.
+    """
+    lookback = settings['risk'].get('sweep_lookback', 20)
+    
+    df['lookback_high'] = df['high'].shift(1).rolling(window=lookback).max()
+    df['lookback_low'] = df['low'].shift(1).rolling(window=lookback).min()
+    df['is_bullish_sweep'] = (df['low'] < df['lookback_low']) & (df['close'] > df['lookback_low'])
+    df['is_bearish_sweep'] = (df['high'] > df['lookback_high']) & (df['close'] < df['lookback_high'])
+    return df
+
+
+def precompute_indicators(data_frames, settings):
+    """
+    Calculates all indicators and creates a timestamp map for maximum speed.
+    This version correctly accepts and passes the 'settings' dictionary.
+    """
+    print("Pre-computing indicators...")
+    for df_name, df in data_frames.items():
+        df.ta.ema(length=50, append=True); df.ta.ema(length=200, append=True)
+        df.ta.adx(length=14, append=True); df.ta.atr(length=14, append=True)
+        df.ta.rsi(length=14, append=True)
+        df['volume_20_avg'] = df['volume'].rolling(window=20).mean()
+        df['avg_body_size_20'] = (df['close'] - df['open']).abs().rolling(window=20).mean()
+
+        if df_name == 'entry_df':
+            df = precompute_smc_signals(df, settings)
+            data_frames[df_name] = df
+            
+    print("Creating HTF timestamp map...")
+    entry_df, htf_1h_df, htf_4h_df = data_frames['entry_df'], data_frames['htf_1h'], data_frames['htf_4h']
+    mapped_1h = htf_1h_df.reindex(entry_df.index, method='ffill')
+    mapped_4h = htf_4h_df.reindex(entry_df.index, method='ffill')
+    for col in ['EMA_50', 'EMA_200']:
+        entry_df[f'1h_{col}'] = mapped_1h[col]
+        entry_df[f'4h_{col}'] = mapped_4h[col]
+    data_frames['entry_df'] = entry_df
+    print("Indicator pre-computation complete.")
+    return data_frames
+
+
+# In backtester.py
+
+def generate_detailed_report(trade_list, starting_equity, settings): #<-- FIX: added 'settings' parameter
+    """
+    Takes a list of trade dictionaries and prints a comprehensive performance report.
+    This is a core, stable function.
+    """
+    if not trade_list:
+        print("\n--- Backtest Report --- \nNo trades were executed.")
+        return
+        
+    # --- The rest of the function remains the same ---
+    df = pd.DataFrame(trade_list)
+    df['pnl_r'] = df['final_r_value']
+    
+    equity = starting_equity
+    pnl_dollars = []
+    equity_curve = [equity]
+
+    # Use the pre-calculated risk_dollars for accurate P&L
+    for _, trade in df.iterrows():
+        dollar_pnl = trade['profit_loss_dollars']
+        equity += dollar_pnl
+        pnl_dollars.append(dollar_pnl)
+        equity_curve.append(equity)
+
+    df['profit_loss_dollars'] = pnl_dollars
+    
+    # --- Portfolio & Return Metrics ---
+    print("\n" + "-"*40)
+    print("--- Portfolio & Return Metrics (After Costs) ---")
+    print("-" * 40)
+    end_equity = equity
+    total_return_percent = (end_equity / starting_equity - 1) * 100
+    start_date, end_date = df['entry_time'].min(), df['entry_time'].max()
+    duration_days = (end_date - start_date).days + 1
+    duration_years = duration_days / 365.25 if duration_days > 0 else 0
+    annualized_return_percent = 0.0
+    if duration_years > 0 and end_equity > 0:
+        annualized_return_percent = (((end_equity / starting_equity) ** (1 / duration_years)) - 1) * 100
+
+    equity_series = pd.Series(equity_curve)
+    peak_equity = equity_series.expanding().max()
+    drawdown = (peak_equity - equity_series) / peak_equity
+    max_drawdown_percent = drawdown.max() * 100 if not drawdown.empty else 0.0
+    
+    total_r = df['pnl_r'].sum()
+    print(f"Starting Equity:         ${starting_equity:,.2f}")
+    print(f"Ending Equity:           ${end_equity:,.2f}")
+    print(f"Total Net Profit:        ${(end_equity - starting_equity):,.2f}")
+    print(f"Annualized Return (CAGR):{annualized_return_percent:.2f}%")
+    print(f"Max Drawdown:            {max_drawdown_percent:.2f}%")
+    print(f"Total R-Gain:            {total_r:.2f}R")
+
+    # --- Trade Statistics ---
+    print("\n" + "-"*40)
+    print("--- Trade Statistics (After Costs) ---")
+    print("-" * 40)
+    total_trades = len(df)
+    wins = df[df['outcome'] == 'Win']
+    losses = df[df['outcome'] == 'Loss']
+    # The new logic doesn't produce 'Breakeven' outcomes anymore.
+    breakevens = df[df['outcome'] == 'Breakeven'] 
+    win_rate_percent = (len(wins) / total_trades) * 100 if total_trades > 0 else 0
+    avg_trade_pnl_r = total_r / total_trades if total_trades > 0 else 0
+    avg_win_r, avg_loss_r = wins['pnl_r'].mean() if not wins.empty else 0, losses['pnl_r'].mean() if not losses.empty else 0
+    gross_profit = df[df['profit_loss_dollars'] > 0]['profit_loss_dollars'].sum()
+    gross_loss = df[df['profit_loss_dollars'] < 0]['profit_loss_dollars'].sum()
+    profit_factor = gross_profit / abs(gross_loss) if gross_loss != 0 else float('inf')
+    
+    print(f"Total Trades:            {total_trades}")
+    print(f"Win Rate:                {win_rate_percent:.2f}% (W:{len(wins)}|L:{len(losses)}|B/E:{len(breakevens)})")
+    print(f"Profit Factor:           {profit_factor:.2f}")
+    print(f"Average Trade:           {avg_trade_pnl_r:.2f}R")
+    print(f"Average Win / Loss (R):  +{avg_win_r:.2f}R / {avg_loss_r:.2f}R")
+    print(f"Biggest Win:             ${df['profit_loss_dollars'].max():,.2f} ({df['pnl_r'].max():.2f}R)")
+    print(f"Biggest Loss:            ${df['profit_loss_dollars'].min():,.2f} ({df['pnl_r'].min():.2f}R)")
+
+    # --- Print Strategy & Cost Parameters ---
+    print("\n--- Strategy Parameters Used ---")
+    for k, v in settings['risk'].items():
+        print(f"{k.replace('_', ' ').title()}: {v}")
+    
+    if 'costs' in settings:
+        print("\n--- Cost Assumptions ---")
+        for k, v in settings['costs'].items():
+            print(f"{k.replace('_', ' ').title()}: {v}%")
+
+    print("------------------------------------------")
+
+
+# --- The Corrected Backtest Logic with Quiet Mode ---
+def run_backtest_logic(data_frames, settings, progress_bar=None, start_index=200, quiet_mode=False):
+    entry_df, trades, active_trade = data_frames['entry_df'], [], None
+    equity = 10000
+    
+    # Extract cost settings once at the beginning
+    fee_percent = settings.get('costs', {}).get('trading_fee_percent', 0)
+    slippage_percent = settings.get('costs', {}).get('slippage_percent', 0)
+
+    i = start_index
+    while i < len(entry_df) - 1:
+        if progress_bar: progress_bar.update(1)
+
+        # --- Management of an Active Trade ---
+        if active_trade:
+            current_candle = entry_df.iloc[i]
+            outcome, final_pnl = None, 0
+
+            # --- Check for Partial Take-Profit (TP1) ---
+            is_tp1_hit = active_trade.get('status') == 'active' and (
+                (active_trade['type'] == 'long' and current_candle['high'] >= active_trade['take_profit_1']) or
+                (active_trade['type'] == 'short' and current_candle['low'] <= active_trade['take_profit_1'])
+            )
+            
+            if is_tp1_hit:
+                partial_exit_price = active_trade['take_profit_1']
+                partial_position_value = (active_trade['position_size'] / 2) * partial_exit_price
+                partial_exit_fee = partial_position_value * (fee_percent / 100)
+                
+                partial_profit = 0.5 * (active_trade['risk_dollars'] * settings['risk']['partial_tp_rr'])
+                net_partial_profit = partial_profit - partial_exit_fee
+                
+                active_trade['partial_profit_booked'] = net_partial_profit
+                active_trade['partial_exit_fee'] = partial_exit_fee
+                active_trade['stop_loss'] = active_trade['entry_price']
+                active_trade['status'] = 'breakeven'
+
+                if progress_bar and not quiet_mode:
+                    print(f"\n>>> PARTIAL PROFIT: Net profit of ${net_partial_profit:,.2f} secured (after ${partial_exit_fee:,.2f} fee).")
+
+            # --- Check for Trade-Ending Conditions ---
+            is_sl_hit = (active_trade['type'] == 'long' and current_candle['low'] <= active_trade['stop_loss']) or \
+                        (active_trade['type'] == 'short' and current_candle['high'] >= active_trade['stop_loss'])
+            
+            is_tp_final_hit = (active_trade['type'] == 'long' and current_candle['high'] >= active_trade['take_profit_final']) or \
+                              (active_trade['type'] == 'short' and current_candle['low'] <= active_trade['take_profit_final'])
+                              
+            if is_sl_hit:
+                final_exit_price = active_trade['stop_loss']
+                if active_trade.get('status') == 'breakeven':
+                    # Stopped at entry after partials. Close the second half.
+                    remaining_pos_value = (active_trade['position_size'] / 2) * final_exit_price
+                    final_exit_fee = remaining_pos_value * (fee_percent / 100)
+                    
+                    outcome = "Win" # Net positive PnL is still a win
+                    final_pnl = active_trade.get('partial_profit_booked', 0) - active_trade['entry_fee'] - final_exit_fee
+                else:
+                    # Full loss. Close the entire position.
+                    full_pos_value = active_trade['position_size'] * final_exit_price
+                    final_exit_fee = full_pos_value * (fee_percent / 100)
+                    
+                    outcome = "Loss"
+                    final_pnl = -active_trade['risk_dollars'] - active_trade['entry_fee'] - final_exit_fee
+            
+            elif is_tp_final_hit:
+                outcome = "Win"
+                final_exit_price = active_trade['take_profit_final']
+                gross_profit = active_trade['risk_dollars'] * active_trade['risk_reward_ratio']
+
+                if active_trade.get('status') == 'breakeven':
+                    # Final TP hit after partials were taken. Close the second half.
+                    remaining_pos_value = (active_trade['position_size'] / 2) * final_exit_price
+                    final_exit_fee = remaining_pos_value * (fee_percent / 100)
+                    total_fees = active_trade['entry_fee'] + active_trade.get('partial_exit_fee', 0) + final_exit_fee
+                    final_pnl = gross_profit - total_fees
+                else:
+                    # Price went straight to final TP. Close the entire position.
+                    full_pos_value = active_trade['position_size'] * final_exit_price
+                    final_exit_fee = full_pos_value * (fee_percent / 100)
+                    total_fees = active_trade['entry_fee'] + final_exit_fee
+                    final_pnl = gross_profit - total_fees
+
+            # --- Record the final trade outcome ---
+            if outcome:
+                finalized_trade = active_trade.copy()
+                finalized_trade.update({'outcome': outcome, 'profit_loss_dollars': final_pnl})
+
+                if finalized_trade['risk_dollars'] > 0:
+                    finalized_trade['final_r_value'] = final_pnl / finalized_trade['risk_dollars']
+                else:
+                    finalized_trade['final_r_value'] = 0
+                trades.append(finalized_trade)
+                active_trade = None
+            
+            i += 1
+            continue
+
+        # --- Search for a New Trade Entry ---
+        analysis = strategy_engine.run_analysis_for_backtest(entry_df, None, "long", settings, i)
+        if analysis['final_report']['recommendation'] != 'PROCEED':
+            analysis = strategy_engine.run_analysis_for_backtest(entry_df, None, "short", settings, i)
+
+        if analysis['final_report']['recommendation'] == 'PROCEED':
+            plan = analysis['trade_plan']
+            ideal_entry = entry_df.iloc[i + 1]['open']
+            trade_type = "long" if ideal_entry > plan['stop_loss'] else "short"
+
+            # --- Apply Slippage to Entry Price ---
+            slippage_mult = 1 + (slippage_percent / 100) if trade_type == 'long' else 1 - (slippage_percent / 100)
+            entry_price = ideal_entry * slippage_mult
+            
+            # --- Recalculate everything based on the slipped entry price ---
+            risk_per_trade_dollars = equity * (settings['risk']['risk_per_trade_percent'] / 100.0)
+            price_risk = abs(entry_price - plan['stop_loss'])
+            
+            if price_risk < 1e-8:
+                i += 1; continue
+                
+            position_size = risk_per_trade_dollars / price_risk
+            entry_fee = (position_size * entry_price) * (fee_percent / 100) # Calculate entry fee
+            
+            if (position_size * entry_price) > (equity * 10):
+                i += 1; continue
+            
+            final_rr = abs(plan['take_profit_final'] - entry_price) / price_risk
+            if final_rr < settings['risk']['min_rr']:
+                i += 1; continue
+            
+            # --- Create the new trade object with cost data ---
+            active_trade = {
+                'entry_time': entry_df.index[i + 1], 'type': trade_type,
+                'entry_price': entry_price, 'stop_loss': plan['stop_loss'],
+                'take_profit_1': plan['take_profit_1'], 'take_profit_final': plan['take_profit_final'],
+                'risk_reward_ratio': round(final_rr, 2), 'status': 'active',
+                'reason': analysis['final_report']['reason'],
+                'risk_dollars': risk_per_trade_dollars, 'position_size': position_size,
+                'entry_fee': entry_fee, 'partial_profit_booked': 0,
+            }
+
+            if progress_bar and not quiet_mode:
+                print(f"\n>>> TRADE ENTERED: {active_trade['type'].upper()} on {active_trade['entry_time'].date()}. "
+                      f"Slipped Entry: {entry_price:.4f}, Entry Fee: ${entry_fee:,.2f}")
+            i += 1
+        i += 1
+    return trades
+
+def run_simple_backtest():
+    print("--- Running a single, simple backtest with default settings ---")
+    data_frames = load_local_data()
+    if not data_frames:
+        print("Could not load default data.")
+        return
+        
+    settings = strategy_engine.SMC_V2_SETTINGS
+    data_frames = precompute_indicators(data_frames, settings)
+    
+    start_index = 200
+    total_candles = len(data_frames['entry_df']) - 200
+    progress_bar = tqdm(total=total_candles, desc="Simulating Trades")
+    
+    trade_list = run_backtest_logic(data_frames, settings, progress_bar, start_index)
+    progress_bar.close()
+
+    print("\n\n--- Backtest Summary ---")
+    if trade_list:
+        print(f"Data Period: {trade_list[0]['entry_time'].date()} to {trade_list[-1]['entry_time'].date()}")
+        print("------------------------------------------")
+        # FIX: Pass the entire 'settings' object instead of one value from it
+        generate_detailed_report(trade_list, 10000, settings)
+        
+if __name__ == "__main__":
+    run_simple_backtest()
+
+--- END OF FILE backtester.py ---
+
+
+--- START OF FILE requirements.txt ---
+
+#   - - -   S T A R T   O F   r e q u i r e m e n t s . t x t   ( V 2   -   C l e a n   &   T e s t e d )   - - - 
+ 
+ 
+ 
+ #   C o r e   L i b r a r i e s   f o r   D a t a   A n a l y s i s   a n d   H T T P   R e q u e s t s 
+ 
+ p a n d a s = = 2 . 2 . 2 
+ 
+ n u m p y = = 1 . 2 6 . 4 
+ 
+ r e q u e s t s = = 2 . 3 1 . 0 
+ 
+ 
+ 
+ #   T h e   T e c h n i c a l   A n a l y s i s   L i b r a r y   a n d   i t s   d e p e n d e n c y 
+ 
+ #   T h i s   s p e c i f i c   v e r s i o n   i s   k n o w n   t o   b e   c o m p a t i b l e   w i t h   n u m p y   1 . 2 6 + 
+ 
+ p a n d a s - t a = = 0 . 3 . 1 4 b 
+ 
+ 
+ 
+ #   F o r   t h e   b a c k t e s t e r ' s   p r o g r e s s   b a r 
+ 
+ t q d m = = 4 . 6 6 . 4 
+ 
+ 
+ 
+ #   W e b   s e r v e r   l i b r a r i e s   ( f o r   w h e n   w e   d e p l o y ,   g o o d   t o   h a v e   h e r e ) 
+ 
+ f a s t a p i = = 0 . 1 1 1 . 0 
+ 
+ u v i c o r n = = 0 . 2 9 . 0 
+ 
+ p y t h o n - b i n a n c e 
+ 
+ 
+ 
+ #   - - -   E N D   O F   r e q u i r e m e n t s . t x t   - - - 
+
+--- END OF FILE requirements.txt ---
+
+
+--- START OF FILE parameters.txt ---
+
+'BTCUSDT': {"min_rr": 3.0, "risk_per_trade_percent": 2.0, "atr_buffer_multiplier": 1.5, "partial_tp_rr": 1.1, "adx_threshold": 22},
+    'SOLUSDT': {"min_rr": 3.0, "risk_per_trade_percent": 2.0, "atr_buffer_multiplier": 2.2, "partial_tp_rr": 1.5, "adx_threshold": 22},
+    'ADAUSDT': {"min_rr": 3.0, "risk_per_trade_percent": 2.0, "atr_buffer_multiplier": 2.0, "partial_tp_rr": 1.1, "adx_threshold": 22},
+
+--- END OF FILE parameters.txt ---
+
+
+--- START OF FILE portfolio.py ---
+
+# advanced_portfolio_backtester.py
+# A deterministic, parallelized, portfolio-level backtesting engine.
+
+import pandas as pd
+import os
+import time
+from itertools import product
+from multiprocessing import Pool
+from tqdm import tqdm
+
+import main as strategy_engine
+import backtester
+
+# --- 1. SCRIPT CONFIGURATION ---
+
+# --- Timeframe ---
+# Set to 1, 2, or 3 for the latest N years. Set to None for the full historical backtest.
+YEARS_TO_TEST = 1
+
+# --- Portfolio Risk Management ---
+MAX_CONCURRENT_TRADES = 20
+STARTING_EQUITY = 10000.0
+
+# --- Strategy Golden Parameters (per asset) ---
+STRATEGY_CONFIG_MAP = {
+    'BTCUSDT': {"min_rr": 3.0, "risk_per_trade_percent": 2.0, "atr_buffer_multiplier": 1.5, "partial_tp_rr": 1.1, "adx_threshold": 22},
+    'SOLUSDT': {"min_rr": 3.0, "risk_per_trade_percent": 2.0, "atr_buffer_multiplier": 2.2, "partial_tp_rr": 1.5, "adx_threshold": 22},
+    'ADAUSDT': {"min_rr": 3.0, "risk_per_trade_percent": 2.0, "atr_buffer_multiplier": 2.0, "partial_tp_rr": 1.1, "adx_threshold": 22},
+}
+
+
+# --- 2. HELPER & WORKER FUNCTIONS ---
+
+def get_ema_slope(series: pd.Series, length: int) -> float:
+    """Helper to calculate EMA slope for the quality score."""
+    if len(series) < length: return 0.0
+    ema = series.ewm(span=length, adjust=False).mean()
+    return ema.iloc[-1] - ema.iloc[-6] if len(ema) > 5 else 0.0
+
+def generate_signals_for_asset(asset):
+    """
+    (WORKER for Phase 1) - Takes one asset, loads its data, and finds all valid entry signals.
+    This function is designed to be run in parallel for each asset.
+    """
+    try:
+        # Load and prepare all required dataframes for this single asset
+        data_frames = {}
+        for timeframe, df_name_key in backtester.REQUIRED_TIMEFRAMES.items():
+            file_path = os.path.join(backtester.DATA_FOLDER, f"{asset}-{timeframe}-data.csv")
+            if not os.path.exists(file_path): raise FileNotFoundError(f"Data for {asset}-{timeframe} not found.")
+            df = pd.read_csv(file_path, index_col='timestamp', parse_dates=True).copy()
+            data_frames[df_name_key] = df
+            
+        asset_settings = {"risk": STRATEGY_CONFIG_MAP[asset]}
+        data_frames = backtester.precompute_indicators(data_frames, asset_settings)
+        
+        entry_df = data_frames['entry_df']
+        signals = []
+        for i in range(200, len(entry_df)):
+            current_slice = entry_df.iloc[:i+1] # Provide historical context to function
+            analysis = None
+            
+            # Check for Long/Short Signals using the strategy engine
+            long_analysis = strategy_engine.run_analysis_for_backtest(entry_df, None, "long", asset_settings, i)
+            if long_analysis['final_report']['recommendation'] == 'PROCEED':
+                analysis = long_analysis; trade_type = 'long'
+            else:
+                short_analysis = strategy_engine.run_analysis_for_backtest(entry_df, None, "short", asset_settings, i)
+                if short_analysis['final_report']['recommendation'] == 'PROCEED':
+                    analysis = short_analysis; trade_type = 'short'
+            
+            if analysis:
+                plan = analysis['trade_plan']
+                # Calculate the Quality Score (Momentum) for this signal
+                quality_score = get_ema_slope(current_slice['close'], 50)
+                # Ensure score is directionally correct
+                quality_score = abs(quality_score) if (trade_type == 'long' and quality_score > 0) or \
+                                                       (trade_type == 'short' and quality_score < 0) else -abs(quality_score)
+                
+                signal_data = {'timestamp': entry_df.index[i], 'symbol': asset, 'type': trade_type, 'quality_score': quality_score, **plan}
+                signals.append(signal_data)
+
+        return pd.DataFrame(signals)
+    except Exception as e:
+        print(f"Error processing {asset}: {e}")
+        return pd.DataFrame()
+
+
+def run_portfolio_simulation(signals_df, unified_timeline):
+    """
+    (Phase 2) - Takes the pre-computed signals and runs the chronological portfolio simulation.
+    This function is single-threaded as it must process events sequentially.
+    """
+    print("\nPhase 2: Running Deterministic Portfolio Simulation...")
+    portfolio_equity = STARTING_EQUITY
+    active_trades = {}
+    closed_trades = []
+    equity_curve = [(unified_timeline.index.min(), STARTING_EQUITY)]
+
+    # Group signals by timestamp for efficient processing
+    signals_by_time = signals_df.groupby('timestamp')
+    
+    for timestamp, candle_group in tqdm(unified_timeline.groupby(level=0), desc="Simulating Portfolio"):
+        # --- 1. EXIT LOGIC ---
+        exited_symbols = []
+        for symbol, trade in active_trades.items():
+            # Find the correct candle for this symbol at the current timestamp
+            if symbol in candle_group['symbol'].values:
+                candle = candle_group[candle_group['symbol'] == symbol].iloc[0]
+                pnl = 0
+                exit_price = 0
+                if trade['type'] == 'long':
+                    if candle['low'] <= trade['stop_loss']: pnl = -trade['risk_dollars']
+                    elif candle['high'] >= trade['take_profit']: pnl = trade['risk_dollars'] * trade['rr']
+                else: # Short
+                    if candle['high'] >= trade['stop_loss']: pnl = -trade['risk_dollars']
+                    elif candle['low'] <= trade['take_profit']: pnl = trade['risk_dollars'] * trade['rr']
+                
+                if pnl != 0:
+                    portfolio_equity += pnl
+                    equity_curve.append((timestamp, portfolio_equity))
+                    trade.update({'exit_time': timestamp, 'pnl_dollars': pnl, 'outcome': 'Win' if pnl > 0 else 'Loss'})
+                    closed_trades.append(trade)
+                    exited_symbols.append(symbol)
+        
+        for symbol in exited_symbols: del active_trades[symbol]
+
+        # --- 2. ENTRY LOGIC ---
+        if timestamp in signals_by_time.groups:
+            # Grab all signals for this exact timestamp
+            potential_trades = signals_by_time.get_group(timestamp)
+            
+            # Sort them by our quality score to prioritize the best ones
+            sorted_trades = potential_trades.sort_values(by='quality_score', ascending=False)
+            
+            for _, signal in sorted_trades.iterrows():
+                # Check portfolio rules
+                if signal['symbol'] not in active_trades and len(active_trades) < MAX_CONCURRENT_TRADES:
+                    # All rules pass, open the trade
+                    risk_dollars = portfolio_equity * (STRATEGY_CONFIG_MAP[signal['symbol']]['risk_per_trade_percent'] / 100.0)
+                    active_trades[signal['symbol']] = {
+                        'entry_time': timestamp, 'symbol': signal['symbol'], 'type': signal['type'],
+                        'entry_price': signal['entry_price'], 'stop_loss': signal['stop_loss'],
+                        'take_profit': signal['take_profit_final'], 'risk_dollars': risk_dollars, 'rr': signal['risk_reward_ratio']
+                    }
+    
+    return closed_trades, portfolio_equity, pd.DataFrame(equity_curve, columns=['timestamp', 'equity'])
+
+def generate_full_report(closed_trades, start_equity, end_equity, equity_curve_df, start_date, end_date):
+    """Generates the final two-tiered portfolio report."""
+    # (This function is the same as the one from the previous version)
+    if not closed_trades: print("\n--- No trades executed. ---"); return
+
+    df = pd.DataFrame(closed_trades)
+    duration_days = (end_date - start_date).days if pd.notna(start_date) and pd.notna(end_date) else len(equity_curve_df['timestamp'].unique())
+    duration_years = max(duration_days / 365.25, 1/365.25)
+    
+    print("\n" + "="*50); print("--- Overall Portfolio Performance ---"); print("="*50)
+    total_return = (end_equity / start_equity - 1) * 100
+    annualized_return = ((end_equity / start_equity) ** (1 / duration_years) - 1) * 100 if duration_years > 0 else 0
+    
+    equity_curve_df['peak'] = equity_curve_df['equity'].expanding().max()
+    equity_curve_df['drawdown'] = (equity_curve_df['peak'] - equity_curve_df['equity']) / equity_curve_df['peak']
+    max_drawdown = equity_curve_df['drawdown'].max() * 100
+    
+    print(f"Test Period:                 {start_date.date()} to {end_date.date()}")
+    print(f"Start/End Equity:            ${start_equity:,.2f} -> ${end_equity:,.2f}")
+    print(f"Net Profit:                  ${end_equity - start_equity:,.2f} | Total Return: {total_return:.2f}%")
+    print(f"Annualized Return (CAGR):    {annualized_return:.2f}%")
+    print(f"Maximum Portfolio Drawdown:  {max_drawdown:.2f}%")
+
+    print("\n" + "="*50); print("--- Per-Asset Contribution ---"); print("="*50)
+    asset_perf = df.groupby('symbol').agg(total_trades=('symbol', 'size'), net_profit=('pnl_dollars', 'sum')).round(2)
+    asset_perf['win_rate_%'] = df[df['pnl_dollars'] > 0].groupby('symbol')['symbol'].count().reindex(asset_perf.index, fill_value=0) / df.groupby('symbol')['symbol'].count() * 100
+    asset_perf['profit_factor'] = df[df['pnl_dollars'] > 0].groupby('symbol')['pnl_dollars'].sum() / abs(df[df['pnl_dollars'] < 0].groupby('symbol')['pnl_dollars'].sum())
+    asset_perf.fillna(0, inplace=True)
+    print(asset_perf.sort_values(by="net_profit", ascending=False))
+    print("=" * 50)
+
+
+# --- 3. MAIN SCRIPT EXECUTION ---
+if __name__ == "__main__":
+    start_time = time.time()
+    
+    # --- PHASE 1: Generate Signals in Parallel ---
+    assets = list(STRATEGY_CONFIG_MAP.keys())
+    with Pool(os.cpu_count()) as p:
+        results = list(tqdm(p.imap(generate_signals_for_asset, assets), total=len(assets), desc="Phase 1: Generating Signals"))
+    
+    all_signals_df = pd.concat(results).sort_values(by='timestamp').reset_index(drop=True)
+    
+    # --- Data Slicing for Simulation ---
+    end_date = all_signals_df['timestamp'].max()
+    start_date = end_date - pd.Timedelta(days=365 * YEARS_TO_TEST) if YEARS_TO_TEST is not None else all_signals_df['timestamp'].min()
+    
+    signals_to_process = all_signals_df[all_signals_df['timestamp'] >= start_date].copy()
+
+    # --- Prepare Unified Timeline for Simulation Period ---
+    unified_list = []
+    for asset in assets:
+        # We need to re-load just the entry_df for the timeline
+        file_path = os.path.join(backtester.DATA_FOLDER, f"{asset}-15m-data.csv")
+        df = pd.read_csv(file_path, index_col='timestamp', parse_dates=True)
+        unified_list.append(df[df.index >= start_date].assign(symbol=asset))
+
+    unified_timeline = pd.concat(unified_list).sort_index()
+
+    print(f"\nFound {len(all_signals_df)} signals total. Processing {len(signals_to_process)} for the period.")
+
+    if not signals_to_process.empty:
+        # --- PHASE 2: Run Sequential Simulation ---
+        final_trades, final_equity, equity_curve = run_portfolio_simulation(signals_to_process, unified_timeline)
+        generate_full_report(final_trades, STARTING_EQUITY, final_equity, equity_curve, start_date, end_date)
+    else:
+        print("No signals found in the specified test period.")
+        
+    end_time = time.time()
+    print(f"\nTotal execution time: {end_time - start_time:.2f} seconds.")
+
+--- END OF FILE portfolio.py ---
+
+
