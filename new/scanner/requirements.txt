@@ -1,0 +1,12 @@
+# Core Libraries for Data Analysis and HTTP Requests
+pandas==2.2.2
+numpy==1.26.4
+requests==2.31.0
+scipy==1.13.1
+
+# The Technical Analysis Library and its dependency
+# This specific version is known to be compatible with numpy 1.26+
+pandas-ta==0.3.14b
+
+# For the progress bars in the backtester and optimizer
+tqdm==4.66.4
